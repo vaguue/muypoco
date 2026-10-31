@@ -1,0 +1,42 @@
+name: Docs
+
+on:
+  push:
+    branches:
+      - release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  docs:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Doxygen
+      run: sudo apt-get update && sudo apt-get install -y doxygen
+
+    - name: Fetch theme
+      run: git clone --depth 1 --branch v2.3.4 https://github.com/jothepro/doxygen-awesome-css docs/theme
+
+    - name: Generate docs
+      run: doxygen docs/Doxyfile
+
+    - uses: actions/configure-pages@v5
+
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: docs/build/html
+
+    - name: Deploy
+      id: deployment
+      uses: actions/deploy-pages@v4

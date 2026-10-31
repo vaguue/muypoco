@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+docs/build/
+docs/theme/
+agent-comment.md
+event-emitter-task.md
