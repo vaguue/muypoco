@@ -2,7 +2,9 @@
 
 `#include "muypoco/timers.h"`
 
-Node's timers. Every timer runs on one shared thread, one callback at a time, so a slow callback delays the rest. Callbacks must be `noexcept`.
+Node's timers, with one difference: every timer runs on its own thread. A slow callback never delays another timer, and none of them run on your main thread. Callbacks of different timers can run at the same time, so shared state needs a lock or an atomic. Callbacks must be `noexcept`.
+
+This is meant for a handful of long-lived jobs (heartbeats, flushes, cleanups), not thousands of short-lived timeouts.
 
 ## Timeout
 
@@ -36,7 +38,7 @@ muypoco::wait();       // returns once nothing is pending or running
 muypoco::clearAll();
 ```
 
-`wait()` never returns while an interval is active.
+`wait()` never returns while an interval is active. Every timer thread is joined: clearing a timer stops its thread, and at exit the pending timers are cancelled and joined.
 
 ## Measure
 

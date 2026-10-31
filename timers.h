@@ -6,7 +6,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -16,7 +15,7 @@
 #include "log.h"
 
 /// @file timers.h
-/// setTimeout / setInterval on one shared timer thread, plus small timing helpers.
+/// setTimeout / setInterval, one thread per timer, plus small timing helpers.
 
 namespace muypoco {
 
@@ -24,144 +23,156 @@ namespace detail::timers {
 
 using clock = std::chrono::steady_clock;
 
+inline thread_local bool onTimerThread = false;
+
 struct timer {
-  clock::duration period;
-  bool repeat;
-  std::shared_ptr<std::function<void()>> callback;
-};
-
-struct deadline {
-  clock::time_point due;
-  int id;
-
-  bool operator>(const deadline& other) const {
-    return this->due > other.due || (this->due == other.due && this->id > other.id);
-  }
-};
-
-struct scheduler {
   std::mutex lock;
   std::condition_variable wake;
-  std::condition_variable idle;
-  std::unordered_map<int, timer> active;
-  std::priority_queue<deadline, std::vector<deadline>, std::greater<deadline>> queue;
-  std::thread worker;
-  int last_id = 0;
-  bool busy = false;
-  bool stopping = false;
+  bool cancelled = false;
+  bool fired = false;
+  bool finished = false;
+  std::thread thread;
+};
 
-  static scheduler& get() {
-    static scheduler instance;
+struct registry {
+  std::mutex lock;
+  std::condition_variable idle;
+  std::unordered_map<int, std::shared_ptr<timer>> live;
+  int last_id = 0;
+  int running = 0;
+
+  static registry& get() {
+    static registry instance;
     return instance;
   }
 
-  ~scheduler() {
-    {
-      std::lock_guard<std::mutex> guard(this->lock);
-      this->stopping = true;
-    }
-    this->wake.notify_all();
+  ~registry() {
+    this->stopAll();
 
-    if (!this->worker.joinable()) {
+    if (onTimerThread) {
+      std::lock_guard<std::mutex> guard(this->lock);
+
+      for (auto& [id, owned] : this->live) {
+        owned->thread.detach();
+      }
       return;
     }
-    if (this->worker.get_id() == std::this_thread::get_id()) {
-      this->worker.detach();
-    }
-    else {
-      this->worker.join();
+
+    this->wait();
+  }
+
+  void reapLocked() {
+    for (auto it = this->live.begin(); it != this->live.end();) {
+      timer& candidate = *it->second;
+
+      if (candidate.finished && candidate.thread.get_id() != std::this_thread::get_id()) {
+        candidate.thread.join();
+        it = this->live.erase(it);
+      }
+      else {
+        ++it;
+      }
     }
   }
 
   int start(std::function<void()> callback, clock::duration period, bool repeat) {
+    const std::shared_ptr<timer> created = std::make_shared<timer>();
     std::lock_guard<std::mutex> guard(this->lock);
 
-    if (!this->worker.joinable()) {
-      this->worker = std::thread([this] {
-        this->run();
-      });
-    }
+    this->reapLocked();
 
     const int id = ++this->last_id;
 
-    this->active.emplace(id, timer{period, repeat, std::make_shared<std::function<void()>>(std::move(callback))});
-    this->queue.push({clock::now() + period, id});
-    this->wake.notify_one();
+    this->live.emplace(id, created);
+    this->running++;
+    created->thread = std::thread([this, created, callback = std::move(callback), period, repeat] {
+      this->run(*created, callback, period, repeat);
+    });
     return id;
   }
 
-  bool settled() const {
-    return this->active.empty() && !this->busy;
+  void run(timer& self, const std::function<void()>& callback, clock::duration period, bool repeat) {
+    onTimerThread = true;
+
+    clock::time_point next = clock::now();
+
+    for (;;) {
+      next += period;
+
+      const clock::time_point now = clock::now();
+
+      if (next < now) {
+        next = now;
+      }
+
+      {
+        std::unique_lock<std::mutex> guard(self.lock);
+
+        if (self.wake.wait_until(guard, next, [&self] { return self.cancelled; })) {
+          break;
+        }
+        if (!repeat) {
+          self.fired = true;
+        }
+      }
+
+      callback();
+
+      if (!repeat) {
+        break;
+      }
+    }
+
+    std::lock_guard<std::mutex> guard(this->lock);
+    self.finished = true;
+    this->running--;
+
+    if (this->running == 0) {
+      this->idle.notify_all();
+    }
   }
 
   bool stop(int id) {
-    std::lock_guard<std::mutex> guard(this->lock);
-    const bool erased = this->active.erase(id) > 0;
+    std::shared_ptr<timer> found;
 
-    if (this->settled()) {
-      this->idle.notify_all();
+    {
+      std::lock_guard<std::mutex> guard(this->lock);
+      this->reapLocked();
+
+      const auto it = this->live.find(id);
+
+      if (it == this->live.end() || it->second->finished) {
+        return false;
+      }
+      found = it->second;
     }
-    return erased;
+
+    std::lock_guard<std::mutex> guard(found->lock);
+
+    if (found->cancelled || found->fired) {
+      return false;
+    }
+    found->cancelled = true;
+    found->wake.notify_all();
+    return true;
   }
 
   void stopAll() {
     std::lock_guard<std::mutex> guard(this->lock);
-    this->active.clear();
 
-    if (this->settled()) {
-      this->idle.notify_all();
+    for (auto& [id, owned] : this->live) {
+      std::lock_guard<std::mutex> timerGuard(owned->lock);
+      owned->cancelled = true;
+      owned->wake.notify_all();
     }
   }
 
   void wait() {
     std::unique_lock<std::mutex> guard(this->lock);
     this->idle.wait(guard, [this] {
-      return this->settled();
+      return this->running == 0;
     });
-  }
-
-  void run() {
-    std::unique_lock<std::mutex> guard(this->lock);
-
-    while (!this->stopping) {
-      if (this->queue.empty()) {
-        this->wake.wait(guard);
-        continue;
-      }
-
-      const deadline next = this->queue.top();
-      const auto found = this->active.find(next.id);
-
-      if (found == this->active.end()) {
-        this->queue.pop();
-        continue;
-      }
-      if (clock::now() < next.due) {
-        this->wake.wait_until(guard, next.due);
-        continue;
-      }
-
-      this->queue.pop();
-
-      const std::shared_ptr<std::function<void()>> callback = found->second.callback;
-
-      if (found->second.repeat) {
-        this->queue.push({std::max(next.due + found->second.period, clock::now()), next.id});
-      }
-      else {
-        this->active.erase(found);
-      }
-
-      this->busy = true;
-      guard.unlock();
-      (*callback)();
-      guard.lock();
-      this->busy = false;
-
-      if (this->settled()) {
-        this->idle.notify_all();
-      }
-    }
+    this->reapLocked();
   }
 };
 
@@ -174,42 +185,42 @@ consteval bool checkCallback() {
 
 }
 
-/// Calls `callback` once after `delay`. Returns an id for clearTimeout.
+/// Calls `callback` once after `delay`, on the timer's own thread. Returns an id for clearTimeout.
 ///
-/// All timers share one thread and run there one after another, like callbacks on Node's event loop:
-/// a slow callback delays the others.
+/// Every timer gets its own thread, so a slow callback never delays another timer,
+/// but callbacks of different timers can run at the same time.
 template <class Callback>
 int setTimeout(Callback&& callback, std::chrono::milliseconds delay) {
   static_cast<void>(detail::timers::checkCallback<Callback>());
-  return detail::timers::scheduler::get().start(std::forward<Callback>(callback), delay, false);
+  return detail::timers::registry::get().start(std::forward<Callback>(callback), delay, false);
 }
 
-/// Calls `callback` every `period` (at least 1ms) until clearInterval. Returns an id for clearInterval.
+/// Calls `callback` every `period` (at least 1ms) until clearInterval, on the timer's own thread. Returns an id for clearInterval.
 /// A late tick is not repeated to catch up.
 template <class Callback>
 int setInterval(Callback&& callback, std::chrono::milliseconds period) {
   static_cast<void>(detail::timers::checkCallback<Callback>());
-  return detail::timers::scheduler::get().start(std::forward<Callback>(callback), std::max(period, std::chrono::milliseconds(1)), true);
+  return detail::timers::registry::get().start(std::forward<Callback>(callback), std::max(period, std::chrono::milliseconds(1)), true);
 }
 
 /// Cancels a timeout. False when it already fired or never existed.
 inline bool clearTimeout(int id) {
-  return detail::timers::scheduler::get().stop(id);
+  return detail::timers::registry::get().stop(id);
 }
 
 /// Cancels an interval. False when it never existed or was already cleared.
 inline bool clearInterval(int id) {
-  return detail::timers::scheduler::get().stop(id);
+  return detail::timers::registry::get().stop(id);
 }
 
 /// Cancels every timer.
 inline void clearAll() {
-  detail::timers::scheduler::get().stopAll();
+  detail::timers::registry::get().stopAll();
 }
 
 /// Blocks until no timer is pending or running. Never returns while an interval is active.
 inline void wait() {
-  detail::timers::scheduler::get().wait();
+  detail::timers::registry::get().wait();
 }
 
 inline thread_local std::chrono::steady_clock::time_point measureStart;
