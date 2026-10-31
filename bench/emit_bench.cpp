@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <vector>
 
 struct tick {
   std::uint64_t value;
@@ -28,6 +30,23 @@ void static_subscribers() {
   bench::on<"static">([](const tick& payload) noexcept {
     sink = sink + payload.value * 4;
   });
+}
+
+void by_hand(const tick& payload) {
+  sink = sink + payload.value;
+  sink = sink + payload.value * 2;
+  sink = sink + payload.value * 3;
+  sink = sink + payload.value * 4;
+}
+
+std::vector<std::function<void(const tick&)>> functions;
+
+void function_subscribers() {
+  for (std::uint64_t factor = 1; factor <= 4; factor++) {
+    functions.push_back([factor](const tick& payload) {
+      sink = sink + payload.value * factor;
+    });
+  }
 }
 
 void runtime_subscribers() {
@@ -86,10 +105,10 @@ bool report(const char* path, double nanoseconds, double limit) {
   const bool ok = limit <= 0 || nanoseconds <= limit;
 
   if (limit > 0) {
-    std::printf("%-22s %7.3f ns/emit  (limit %.3f)  %s\n", path, nanoseconds, limit, ok ? "ok" : "REGRESSION");
+    std::printf("%-32s %7.3f ns/emit  (limit %.3f)  %s\n", path, nanoseconds, limit, ok ? "ok" : "REGRESSION");
   }
   else {
-    std::printf("%-22s %7.3f ns/emit\n", path, nanoseconds);
+    std::printf("%-32s %7.3f ns/emit\n", path, nanoseconds);
   }
   return ok;
 }
@@ -98,6 +117,7 @@ int main(int count, char** arguments) {
   const limits limit = parse(count, arguments);
 
   runtime_subscribers();
+  function_subscribers();
 
 #ifdef MUYPOCO_EVENTS_INLINE
   const char* static_path = "inline, 4 handlers";
@@ -114,6 +134,18 @@ int main(int count, char** arguments) {
   const double empty_ns = measure([](const tick& payload) {
     bench.emit<"nobody">(payload);
   });
+
+  const double by_hand_ns = measure([](const tick& payload) {
+    by_hand(payload);
+  });
+  const double functions_ns = measure([](const tick& payload) {
+    for (const std::function<void(const tick&)>& function : functions) {
+      function(payload);
+    }
+  });
+
+  report("baseline: 4 calls by hand", by_hand_ns, 0);
+  report("baseline: vector<std::function>", functions_ns, 0);
 
   bool ok = true;
   ok = report(static_path, static_ns, limit.static_ns) && ok;

@@ -29,7 +29,7 @@ struct table {
   segment<Payload>* tail = nullptr;
   std::atomic<std::size_t> count{0};
 
-  void append(entry<Payload> subscriber) noexcept {
+  [[gnu::noinline]] void append(entry<Payload> subscriber) noexcept {
     std::lock_guard<std::mutex> lock(subscription_lock);
 
     if (this->tail == nullptr) {

@@ -41,6 +41,8 @@ int main() {
 
 `audit()` is never called and still prints: `::on` subscribes because the code exists, `.on` subscribes when it runs.
 
+Emit is cheap. In a single-file build, `emit` compiles to the same code as calling the handlers by hand. In a normal build it costs about 2 ns per handler, and an event nobody listens to costs 0.3 ns. [Numbers](https://vaguue.github.io/muypoco/events.html).
+
 ```cpp
 muypoco::Chan<Store, Write, 1024> store;
 store.start();
@@ -74,9 +76,9 @@ exe.root_module.addIncludePath(muypoco.namedLazyPath("include"));
 #include "muypoco/events.h"
 ```
 
-This needs Zig 0.16.0. To use the inline emitter backend, add `exe.root_module.addCMacro("MUYPOCO_EVENTS_INLINE", "1");` and build the program as one translation unit.
+This needs Zig 0.16.0. For the single-file build, compile the program as one translation unit and add `exe.root_module.addCMacro("MUYPOCO_EVENTS_INLINE", "1");`.
 
-With the default backend, a file that only contains `::on` subscriptions must be linked as an object (`exe.root_module.addObject(...)`), not through a static library, or the linker drops it. See [linking](https://vaguue.github.io/muypoco/events.html#linking).
+In a normal build, a file that only contains `::on` subscriptions must be linked as an object (`exe.root_module.addObject(...)`), not through a static library, or the linker drops it. See [linking](https://vaguue.github.io/muypoco/events.html#linking).
 
 #### cxx_modules
 
@@ -95,7 +97,7 @@ Clone the repo as `muypoco/` and add its parent directory to the include path.
 ## Develop
 
 ```
-zig build test                  # all tests, both emitter backends
+zig build test                  # all tests, normal and single-file builds
 zig build examples              # build and run every example
 zig build bench                 # emit benchmark, -Dbench-max-*-ns to fail on regression
 ```

@@ -4,6 +4,13 @@
 
 A Node-style `EventEmitter`. Event names are string literals checked at compile time. Static subscriptions get wired before `main`.
 
+It costs next to nothing:
+
+- **`muypoco::events::on` in a single-file build:** `emit` compiles to the same instructions as calling the handlers by hand. No loop, no function pointers, nothing left of the emitter in the binary.
+- **`muypoco::events::on` in a normal build, and `muypoco::events.on`:** one indirect call per handler, about 2 ns each. That's on par with, or a bit faster than, looping over a `std::vector<std::function>`.
+- **No subscribers:** about 0.3 ns, one load and one branch.
+- **Every emit:** no allocations, no locks, no strings, no hashing, no RTTI, no exceptions.
+
 ## Bus
 
 ```cpp
@@ -132,16 +139,29 @@ void test_retry() {
 
 Runnable versions are in [examples/](https://github.com/vaguue/muypoco/tree/main/examples).
 
-## Backends
+## Cost at runtime
 
-| backend | how | emit |
-|---|---|---|
-| registrar (default) | standard C++; each static subscriber is an inline variable whose initializer registers it | loop of indirect calls |
-| inline, `-DMUYPOCO_EVENTS_INLINE` | whole program in one translation unit; friend injection, clang only | direct, inlinable calls |
+`muypoco::events::on` has two implementations, picked at build time:
 
-4 handlers, ReleaseFast, Apple M-series: inline 1.5 ns, registrar 8.5 ns, runtime 9.8 ns, no subscribers 0.3 ns.
+- **Normal build:** any number of `.cpp` files. Each `muypoco::events::on` adds a function pointer to the event's list before `main`, and `emit` calls them in a loop.
+- **Single-file build (`-DMUYPOCO_EVENTS_INLINE`):** the whole program is one translation unit, so the compiler sees every `muypoco::events::on`, and `emit` becomes direct calls, the same code you'd write by hand. clang only.
 
-## Linking (registrar) {#linking}
+`muypoco::events.on` always uses the list. It stores a function pointer plus a pointer to what the lambda captured.
+
+`zig build bench`: one `emit` reaching 4 handlers, each doing a volatile write. ReleaseFast, Apple M-series.
+
+| | ns per emit |
+|---|---|
+| calling the 4 handlers by hand | 2.9 |
+| `muypoco::events::on`, single-file build | 1.4–1.9 |
+| `muypoco::events::on`, normal build | 8.4–8.8 |
+| `muypoco::events.on` | 9.8 |
+| `std::vector<std::function>` loop | 9.9 |
+| `muypoco::events.emit` with no subscribers | 0.3 |
+
+In the single-file build, `emit` and the hand-written calls compile to the same instructions. The gap between them is the CPU, not the emitter.
+
+## Linking (normal build) {#linking}
 
 A file that only contains `net::on` calls is referenced by nothing. If it sits in a static library, the linker drops it along with its subscribers. Link such modules as object files or with whole-archive:
 
@@ -160,7 +180,7 @@ Without `NDEBUG`, the first emit checks the whole program and aborts with a mess
 - something subscribes to an event nobody emits (typo);
 - one event is used with two payload types;
 - a registration happens after the first emit (something emitted before `main`);
-- the inline backend is split across translation units.
+- a single-file build is actually split across several translation units.
 
 Call `auto [ok, message] = muypoco::validate();` to run these checks yourself.
 
