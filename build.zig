@@ -1,11 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const pinned_zig_version = "0.16.0";
+const minimum_zig_version: std.SemanticVersion = .{ .major = 0, .minor = 16, .patch = 0 };
 
 comptime {
-  if (!std.mem.eql(u8, builtin.zig_version_string, pinned_zig_version)) {
-    @compileError("muypoco is pinned to zig " ++ pinned_zig_version ++ ", found " ++ builtin.zig_version_string);
+  if (builtin.zig_version.order(minimum_zig_version) == .lt) {
+    @compileError("muypoco needs zig 0.16.0 or newer, found " ++ builtin.zig_version_string);
   }
 }
 
