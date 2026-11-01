@@ -157,8 +157,8 @@ inline validation check_cells(const record* compiled) {
   }
   return reject(std::snprintf(validation_message, sizeof(validation_message),
                               "muypoco: event \"%.*s\" on bus %.*s has %zu static subscriber(s) in the program "
-                              "but emit was compiled with %zu; the inline backend needs a single translation unit "
-                              "and Bus::on calls outside of templates",
+                              "but emit was compiled with %zu; in the single-file build, a Bus::on inside a template "
+                              "that is instantiated after the emit is missed, so move it out of the template",
                               length(compiled->event), compiled->event.data(),
                               length(compiled->bus_name), compiled->bus_name.data(),
                               handlers, compiled->cells));

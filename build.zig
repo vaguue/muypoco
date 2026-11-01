@@ -125,6 +125,47 @@ fn addAbortTest(config: Config, step: *std.Build.Step, name: []const u8, sources
   step.dependOn(&run.step);
 }
 
+fn addLinkFailureTest(b: *std.Build, step: *std.Build.Step, name: []const u8, sources: []const []const u8, message: []const u8) void {
+  const run = b.addSystemCommand(&.{ b.graph.zig_exe, "c++", "-std=c++20", "-fno-exceptions", "-fno-rtti", "-DMUYPOCO_EVENTS_INLINE" });
+  run.addArg("-I");
+  run.addDirectoryArg(b.path("."));
+
+  for (sources) |source| {
+    run.addFileArg(b.path(source));
+  }
+
+  run.addArg("-o");
+  _ = run.addOutputFileArg(name);
+  run.expectExitCode(1);
+  run.addCheck(.{ .expect_stderr_match = message });
+  step.dependOn(&run.step);
+}
+
+fn libraryModule(config: Config) *std.Build.Module {
+  const module = cppModule(config);
+  module.addIncludePath(config.b.path("tests/library"));
+  return module;
+}
+
+fn libraryExecutable(app: Config, dicker: Config, name: []const u8) *std.Build.Step.Compile {
+  if (app.backend == .@"inline" and dicker.backend == .@"inline") {
+    const files = app.b.addWriteFiles();
+    const unity = files.add(app.b.fmt("{s}-unity.cpp", .{name}), "#include \"tests/library/dicker/dicker.cpp\"\n#include \"tests/library/app/main.cpp\"\n");
+    const module = libraryModule(app);
+    module.addCSourceFile(.{ .file = unity, .flags = &cxx_flags });
+    return app.b.addExecutable(.{ .name = name, .root_module = module });
+  }
+
+  const module = libraryModule(app);
+  addSources(module, &.{"tests/library/app/main.cpp"});
+
+  const executable = app.b.addExecutable(.{ .name = name, .root_module = module });
+  const dicker_module = libraryModule(dicker);
+  addSources(dicker_module, &.{"tests/library/dicker/dicker.cpp"});
+  executable.root_module.addObject(app.b.addObject(.{ .name = app.b.fmt("{s}-dicker", .{name}), .root_module = dicker_module }));
+  return executable;
+}
+
 const public_headers = [_][]const u8{
   "events.h",
   "chan.h",
@@ -223,7 +264,22 @@ pub fn build(b: *std.Build) void {
   addAbortTest(debug, test_step, "chan-second-consumer", &.{"tests/checks/second_consumer.cpp"}, "Chan is single-consumer but a second thread consumed it");
 
   const debug_inline: Config = .{ .b = b, .target = target, .optimize = .Debug, .backend = .@"inline", .include = include };
-  addAbortTest(debug_inline, test_step, "validation-split-inline", &.{ "tests/validation/split_emitter.cpp", "tests/validation/split_subscriber.cpp" }, "the inline backend needs a single translation unit");
+  addAbortTest(debug_inline, test_step, "validation-late-template", &.{"tests/validation/late_template.cpp"}, "a Bus::on inside a template that is instantiated after the emit is missed");
+  addLinkFailureTest(b, test_step, "single-file-twice", &.{ "tests/validation/split_emitter.cpp", "tests/validation/split_subscriber.cpp" }, "muypoco_events_single_file_build_allows_one_translation_unit");
+
+  for (backendsToTest(selected_backend)) |tested| {
+    const library_config: Config = .{ .b = b, .target = target, .optimize = optimize, .backend = tested, .include = include };
+    addTestRun(b, test_step, libraryExecutable(library_config, library_config, b.fmt("library-{s}", .{@tagName(tested)})));
+  }
+
+  for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+    const app_config: Config = .{ .b = b, .target = target, .optimize = mode, .backend = .@"inline", .include = include };
+    const dicker_config: Config = .{ .b = b, .target = target, .optimize = mode, .backend = .registrar, .include = include };
+    const mixed = b.addRunArtifact(libraryExecutable(app_config, dicker_config, b.fmt("library-mixed-{s}", .{@tagName(mode)})));
+    mixed.addCheck(.{ .expect_term = .{ .signal = .ABRT } });
+    mixed.addCheck(.{ .expect_stderr_match = "muypoco: mixed builds:" });
+    test_step.dependOn(&mixed.step);
+  }
 
   const bench_step = b.step("bench", "Benchmark emit on every path (always ReleaseFast); -Dbench-max-*-ns fail on regression");
 

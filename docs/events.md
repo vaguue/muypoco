@@ -226,6 +226,55 @@ target_link_libraries(app PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,service>")   # C
 
 Zig 0.16 has no whole-archive switch, so build such modules with `b.addObject` and link them with `exe.root_module.addObject(object)`.
 
+## Libraries {#libraries}
+
+A library that uses muypoco events, say dicker, doesn't pick the build mode. The app that uses it does. dicker's code (`::on`, `emit`) stays the same either way.
+
+dicker ships one entry file that `#include`s all of its sources:
+
+```cpp
+// dicker.cpp
+#include "src/core.cpp"
+#include "src/audit.cpp"
+```
+
+The app uses it in one of two ways:
+
+- **Normal build:** compile `dicker.cpp` as one more source file of the app. dicker's subscriptions live in the same object file as the rest of dicker, so the linker can't drop them, and no whole-archive is needed.
+- **Single-file build:** the app's one `.cpp`, compiled with `-DMUYPOCO_EVENTS_INLINE`, includes it:
+
+```cpp
+// unity.cpp
+#include "dicker.cpp"
+#include "src/main.cpp"
+```
+
+In `build.zig`:
+
+```zig
+const dicker = b.dependency("dicker", .{});
+
+// normal build
+module.addCSourceFile(.{ .file = dicker.path("dicker.cpp"), .flags = &flags });
+
+// single-file build
+const unity = b.addWriteFiles().add("unity.cpp", "#include \"dicker.cpp\"\n#include \"src/main.cpp\"\n");
+module.addIncludePath(dicker.path("."));
+module.addIncludePath(b.path("."));
+module.addCMacro("MUYPOCO_EVENTS_INLINE", "1");
+module.addCSourceFile(.{ .file = unity, .flags = &flags });
+```
+
+In the single-file build, dicker's sources end up in one file with the app's and get compiled with the app's flags. So dicker's sources have to follow a few rules:
+
+- no file-level `static` or anonymous-namespace names that could clash with someone else's;
+- no `using namespace` at file scope;
+- every `#define` gets an `#undef` at the end of its file;
+- defines dicker needs go into `dicker.cpp` itself, not into its build flags;
+- only code that uses muypoco events goes into the entry file. Third-party sources are compiled on their own.
+
+Mixing modes, like dicker compiled normally and the app single-file, aborts before `main` with `muypoco: mixed builds: main.cpp uses the single-file build but dicker.cpp uses the normal build`. A working example is in [tests/library](https://github.com/vaguue/muypoco/tree/main/tests/library).
+
 ## Debug checks
 
 Without `NDEBUG`, the first emit checks the whole program and aborts with a message if:
@@ -233,9 +282,14 @@ Without `NDEBUG`, the first emit checks the whole program and aborts with a mess
 - something subscribes to an event nobody emits (typo);
 - one event is used with two payload types;
 - a registration happens after the first emit (something emitted before `main`);
-- a single-file build is actually split across several translation units.
+- in a single-file build, a `::on` inside a template was instantiated after the `emit` it belongs to.
 
 Call `auto [ok, message] = muypoco::validate();` to run these checks yourself.
+
+Two more checks run in every build, release included:
+
+- **Mixed builds** abort before `main`. Each file that includes `events.h` registers its build mode at startup, so this costs one comparison per file and nothing on `emit`.
+- **Two single-file translation units** in one program fail to link, with `duplicate symbol muypoco_events_single_file_build_allows_one_translation_unit`.
 
 ## Rules
 

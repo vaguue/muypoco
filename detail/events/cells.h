@@ -8,6 +8,8 @@
 #include "storage.h"
 #include "validation.h"
 
+extern "C" const char muypoco_events_single_file_build_allows_one_translation_unit = 1;
+
 namespace muypoco::detail::cells {
 namespace {
 

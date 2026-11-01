@@ -154,7 +154,7 @@ exe.root_module.addIncludePath(muypoco.namedLazyPath("include"));
 #include "muypoco/events.h"
 ```
 
-This needs Zig 0.16.0 or newer. For the single-file build, compile the program as one translation unit and add `exe.root_module.addCMacro("MUYPOCO_EVENTS_INLINE", "1");`.
+This needs Zig 0.16.0 or newer. For the single-file build, compile the program as one translation unit and add `exe.root_module.addCMacro("MUYPOCO_EVENTS_INLINE", "1");`. If you're writing a library that uses muypoco events, ship one entry `.cpp` and let the app pick the mode; see [libraries](https://vaguue.github.io/muypoco/events.html#libraries).
 
 In a normal build, a file that only contains `::on` subscriptions must be linked as an object (`exe.root_module.addObject(...)`), not through a static library, or the linker drops it. See [linking](https://vaguue.github.io/muypoco/events.html#linking).
 
