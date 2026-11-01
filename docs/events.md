@@ -14,12 +14,19 @@ It costs next to nothing:
 ## Bus
 
 ```cpp
+MUYPOCO_BUS(net);
+```
+
+That's a bus called `net`: `net::on` subscribes by presence of code, and `net.on` / `net.emit` work at runtime. Each bus has its own subscribers, so modules can each have their own without clashing. `muypoco::events` is a ready-made default bus.
+
+Use it at namespace scope. It expands to a struct and a constant with the same name:
+
+```cpp
 struct net : muypoco::bus<net> {};
 inline constexpr muypoco::handle<net> net{};
 ```
 
-The struct and the constant share one name on purpose: `net::` is the compile-time side, `net.` the runtime side.
-Each bus has its own subscribers. `muypoco::events` is a ready-made default bus.
+Inside a function, for example in a test, write those two lines yourself, with `constexpr` instead of `inline constexpr`.
 
 ## Subscribe
 
@@ -50,7 +57,54 @@ net.emit<"data">(Data{42});
 
 Emit runs synchronously in the calling thread. Static subscribers run first, then runtime ones in the order they subscribed. The payload is passed by `const&` with no copies. Emit doesn't allocate, lock, throw, hash, or use RTTI. An event nobody listens to is a no-op.
 
-Emitting from several threads is fine, and so is subscribing while another thread emits. A listener added during an emit runs from the next emit on.
+A listener added during an emit runs from the next emit on.
+
+## Threads {#threads}
+
+- **`emit`** can be called from any thread, at the same time. It reads the subscriber list without locking.
+- **`.on`** takes a short lock and is safe while other threads emit.
+- **Handlers run on the thread that called `emit`,** synchronously. Nothing is delivered to another thread: a handler subscribed in `main` runs on the timer thread when a timer emits. If several threads emit the same event, the handler runs on all of them, possibly at once, so its state has to be thread-safe.
+- **`once`** fires exactly once, even with concurrent emits.
+
+To move work to another thread, enqueue it into a `Chan` from the handler:
+
+```cpp
+muypoco::Chan<Reporter, Report, 64> reporter;
+reporter.start();
+
+app.on<"tick">([&reporter](const Tick& tick) noexcept {
+  reporter.enqueue(Report{tick.number});          // runs on the timer thread
+});
+
+muypoco::setInterval([]() noexcept {
+  app.emit<"tick">(Tick{1});                      // timer thread
+}, 5ms);
+```
+
+The timer thread emits, the handler runs right there, and `Reporter::process` runs on the Chan's worker thread. A Chan has exactly one producer, so if more than one thread emits that event, give each one its own Chan. Debug builds abort on a second producer. The full version is in [examples/pipeline.cpp](https://github.com/vaguue/muypoco/blob/main/examples/pipeline.cpp).
+
+To handle an event on the main thread, forward it into a Chan whose loop runs on main. Call `run()` instead of `start()`:
+
+```cpp
+struct OnMain {
+  void process(Tick& tick) noexcept;              // main thread
+};
+
+muypoco::Chan<OnMain, Tick, 64> mainLoop;
+
+app::on<"tick">([](const Tick& tick) noexcept {
+  mainLoop.enqueue(tick);                         // emitting thread
+});
+
+int main() {
+  // ...
+  mainLoop.run();                                 // until mainLoop.stop()
+}
+```
+
+If main already has its own loop, call `mainLoop.drain()` once per iteration instead. It handles what's queued and returns without blocking.
+
+Full version: [examples/main_thread.cpp](https://github.com/vaguue/muypoco/blob/main/examples/main_thread.cpp).
 
 ## Examples
 
@@ -58,8 +112,7 @@ A bus per subsystem, so names don't clash:
 
 ```cpp
 namespace net {
-struct events : muypoco::bus<events> {};
-inline constexpr muypoco::handle<events> events{};
+MUYPOCO_BUS(events);
 }
 
 net::events::on<"closed">([](const Connection& c) noexcept { release(c); });

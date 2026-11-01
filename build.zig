@@ -170,6 +170,7 @@ pub fn build(b: *std.Build) void {
     "examples/timers.cpp",
     "examples/log.cpp",
     "examples/pipeline.cpp",
+    "examples/main_thread.cpp",
   };
 
   const examples_step = b.step("examples", "Build and run every example (-Dbackend selects the emitter backend)");
@@ -218,7 +219,8 @@ pub fn build(b: *std.Build) void {
   addAbortTest(debug, test_step, "validation-early-emit", &.{ "tests/validation/early_emit_emitter.cpp", "tests/validation/early_emit_subscriber.cpp" }, "something emitted before main started");
 
   addAbortTest(debug, test_step, "chan-second-producer", &.{"tests/checks/second_producer.cpp"}, "Chan is single-producer but a second thread enqueued");
-  addAbortTest(debug, test_step, "chan-self-enqueue", &.{"tests/checks/self_enqueue.cpp"}, "Chan worker enqueued into its own channel");
+  addAbortTest(debug, test_step, "chan-self-enqueue", &.{"tests/checks/self_enqueue.cpp"}, "Chan consumer enqueued into its own channel");
+  addAbortTest(debug, test_step, "chan-second-consumer", &.{"tests/checks/second_consumer.cpp"}, "Chan is single-consumer but a second thread consumed it");
 
   const debug_inline: Config = .{ .b = b, .target = target, .optimize = .Debug, .backend = .@"inline", .include = include };
   addAbortTest(debug_inline, test_step, "validation-split-inline", &.{ "tests/validation/split_emitter.cpp", "tests/validation/split_subscriber.cpp" }, "the inline backend needs a single translation unit");

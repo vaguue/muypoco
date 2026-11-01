@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <thread>
 
 #include "check.h"
 
@@ -142,8 +143,68 @@ void test_worker_outlives_thread() {
   check(true, "worker state is destroyed only after the thread joined");
 }
 
+struct Recorder {
+  std::thread::id* seen;
+  int processed = 0;
+  bool initialized = false;
+
+  void init() noexcept {
+    this->initialized = true;
+  }
+
+  void process(Plain&) noexcept {
+    *this->seen = std::this_thread::get_id();
+    this->processed++;
+  }
+};
+
+void test_drain() {
+  std::thread::id seen;
+  muypoco::Chan<Recorder, Plain, 16> chan(&seen);
+
+  check(chan.drain() == 0, "drain on an empty queue returns 0 without blocking");
+  check(chan.worker.initialized, "the first drain runs init");
+
+  std::thread producer([&chan] {
+    for (int i = 0; i < 100; i++) {
+      chan.enqueue(Plain{1});
+    }
+  });
+
+  int drained = 0;
+
+  while (drained < 100) {
+    drained += static_cast<int>(chan.drain());
+    std::this_thread::yield();
+  }
+  producer.join();
+
+  check(drained == 100 && chan.worker.processed == 100, "drain processes every task exactly once");
+  check(seen == std::this_thread::get_id(), "drain runs process() on the calling thread");
+}
+
+void test_run_on_caller() {
+  std::thread::id seen;
+  muypoco::Chan<Recorder, Plain, 16> chan(&seen);
+
+  std::thread producer([&chan] {
+    for (int i = 0; i < 10; i++) {
+      chan.enqueue(Plain{1});
+    }
+    chan.stop();
+  });
+
+  chan.run();
+  producer.join();
+
+  check(chan.worker.processed == 10, "run on the caller drains the queue before returning");
+  check(seen == std::this_thread::get_id(), "run runs process() on the calling thread");
+}
+
 int main() {
   test_enqueue_and_drain();
+  test_drain();
+  test_run_on_caller();
   test_await();
   test_void_process();
   test_try_enqueue_full();

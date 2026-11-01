@@ -150,11 +150,13 @@ void never_called_once() {
   });
 }
 
-struct alpha : muypoco::bus<alpha> {};
-inline constexpr muypoco::handle<alpha> alpha{};
+MUYPOCO_BUS(alpha);
 
-struct beta : muypoco::bus<beta> {};
-inline constexpr muypoco::handle<beta> beta{};
+namespace module {
+MUYPOCO_BUS(beta);
+}
+
+using module::beta;
 
 int alpha_hits = 0;
 int beta_hits = 0;

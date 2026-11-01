@@ -43,6 +43,8 @@ Each thread logs into its own 64 KB ring buffer, and one background thread write
 muypoco::log().dropped();
 ```
 
+Each thread's lines stay in order. Lines from different threads can come out in a different order than they happened, because each thread's buffer is written as a batch.
+
 Lines are up to 1 KB. Longer ones are truncated but keep their newline.
 
 ## Own instance

@@ -12,8 +12,7 @@ struct tick {
   std::uint64_t value;
 };
 
-struct bench : muypoco::bus<bench> {};
-inline constexpr muypoco::handle<bench> bench{};
+MUYPOCO_BUS(bench);
 
 volatile std::uint64_t sink = 0;
 

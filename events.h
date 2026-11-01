@@ -133,3 +133,14 @@ struct events : bus<events> {};
 inline constexpr handle<events> events{};
 
 }
+
+/// Declares a bus at namespace scope: `MUYPOCO_BUS(net);` gives `net::on` (by presence of code)
+/// and `net.on` / `net.emit` (at runtime). Each bus has its own subscribers, so modules don't clash.
+/// It expands to:
+/// @code
+/// struct net : muypoco::bus<net> {};
+/// inline constexpr muypoco::handle<net> net{};
+/// @endcode
+#define MUYPOCO_BUS(name) \
+  struct name : ::muypoco::bus<name> {}; \
+  inline constexpr ::muypoco::handle<name> name {}

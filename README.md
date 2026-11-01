@@ -53,6 +53,8 @@ int main() {
 
 `audit()` is never called and still prints: `::on` subscribes because the code exists, `.on` subscribes when it runs.
 
+Modules can have their own bus with `MUYPOCO_BUS(net);`, then `net::on`, `net.on` and `net.emit`.
+
 Emit is cheap. In a single-file build, `emit` compiles to the same code as calling the handlers by hand. In a normal build it costs about 2 ns per handler, and an event nobody listens to costs 0.3 ns. [Numbers](https://vaguue.github.io/muypoco/events.html).
 
 ```cpp
@@ -66,6 +68,70 @@ muypoco::clearInterval(id);
 muypoco::log().start();
 muypoco::log().info("listening on %d", 8080);
 ```
+
+### All together
+
+A timer emits ticks, a handler picks them up, and a Chan worker writes reports on its own thread:
+
+```cpp
+#include <atomic>
+#include <chrono>
+
+#include "muypoco/chan.h"
+#include "muypoco/events.h"
+#include "muypoco/log.h"
+#include "muypoco/timers.h"
+
+using namespace std::chrono_literals;
+
+struct Tick {
+  int number;
+};
+
+struct ReporterTask {
+  int number = 0;
+};
+
+struct Reporter {
+  void process(ReporterTask& report) noexcept {
+    muypoco::log().info("report %d written", report.number);   // worker thread
+  }
+};
+
+MUYPOCO_BUS(app);
+
+void announce() {
+  app::on<"tick">([](const Tick& tick) noexcept {               // never called, still subscribed
+    muypoco::log().info("tick %d", tick.number);                // timer thread
+  });
+}
+
+int main() {
+  muypoco::Chan<Reporter, ReporterTask, 64> reporter;
+  reporter.start();
+
+  app.on<"tick">([&reporter](const Tick& tick) noexcept {
+    reporter.enqueue(ReporterTask{tick.number});                // timer thread
+  });
+
+  std::atomic<int> ticks{0};
+  std::atomic<int> clock{0};
+
+  clock = muypoco::setInterval([&]() noexcept {
+    const int number = ++ticks;
+
+    app.emit<"tick">(Tick{number});                             // timer thread
+    if (number == 3) {
+      muypoco::clearInterval(clock);
+    }
+  }, 5ms);
+
+  muypoco::wait();
+  reporter.shutdown();
+}
+```
+
+Handlers run on the thread that emits, here the timer's. The Chan moves the work to its worker. The full version, with each log line labeled by thread, is [examples/pipeline.cpp](https://github.com/vaguue/muypoco/blob/main/examples/pipeline.cpp).
 
 More in [examples/](https://github.com/vaguue/muypoco/tree/main/examples) and the [docs](https://vaguue.github.io/muypoco).
 

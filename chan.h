@@ -40,31 +40,27 @@ concept awaitable_task = requires(Task task) {
 
 namespace detail {
 
-template <bool Enabled>
 struct thread_owner {
   std::atomic<std::thread::id> owner{};
 
   void claim(const char* message) noexcept {
-    const std::thread::id self = std::this_thread::get_id();
-    std::thread::id expected{};
+    if constexpr (checks) {
+      const std::thread::id self = std::this_thread::get_id();
+      std::thread::id expected{};
 
-    if (!this->owner.compare_exchange_strong(expected, self, std::memory_order_relaxed) && expected != self) {
-      violated(message);
+      if (!this->owner.compare_exchange_strong(expected, self, std::memory_order_relaxed) && expected != self) {
+        violated(message);
+      }
     }
   }
 
   bool is(std::thread::id other) const noexcept {
-    return this->owner.load(std::memory_order_relaxed) == other;
-  }
-};
-
-template <>
-struct thread_owner<false> {
-  void claim(const char*) noexcept {
-  }
-
-  bool is(std::thread::id) const noexcept {
-    return false;
+    if constexpr (checks) {
+      return this->owner.load(std::memory_order_relaxed) == other;
+    }
+    else {
+      return false;
+    }
   }
 };
 
@@ -83,8 +79,10 @@ struct thread_owner<false> {
 /// db.start();
 /// db.enqueue(Query{...});
 /// @endcode
-/// One thread enqueues, the worker thread processes. Debug builds abort when a second thread enqueues,
-/// or when the worker enqueues into or awaits its own channel; release builds check nothing.
+/// One thread enqueues, one thread processes: the worker thread from start(), or your own thread
+/// through run() (blocking) or drain() (non-blocking). Debug builds abort when a second thread enqueues,
+/// when a second thread consumes, or when the consumer enqueues into or awaits its own channel;
+/// release builds check nothing.
 template <class Worker, class Task, std::size_t Capacity>
 struct Chan {
   static_assert(Capacity > 0 && (Capacity & (Capacity - 1)) == 0, "muypoco: Chan capacity must be a power of two");
@@ -103,7 +101,8 @@ struct Chan {
   alignas(64) std::atomic<bool> stopped{false};
   alignas(64) std::atomic<int> initState{-1};
 
-  [[no_unique_address]] detail::thread_owner<detail::checks> producer;
+  detail::thread_owner producer;
+  detail::thread_owner consumer;
   std::thread th;
 
   /// Arguments are forwarded to the worker's constructor.
@@ -219,8 +218,8 @@ struct Chan {
 
   void checkProducer() {
     if constexpr (detail::checks) {
-      if (this->th.get_id() == std::this_thread::get_id()) {
-        detail::violated("muypoco: Chan worker enqueued into its own channel; it would deadlock once the queue is full");
+      if (this->consumer.is(std::this_thread::get_id())) {
+        detail::violated("muypoco: Chan consumer enqueued into its own channel; it would deadlock once the queue is full");
       }
       this->producer.claim("muypoco: Chan is single-producer but a second thread enqueued");
     }
@@ -276,9 +275,39 @@ struct Chan {
     }
   }
 
-  void run() noexcept {
-    const bool ready = this->init();
+  bool ensureInit() noexcept {
+    const int state = this->initState.load(std::memory_order_acquire);
 
+    if (state == -1) {
+      return this->init();
+    }
+    return state == 1;
+  }
+
+  void consume(std::size_t hd, bool ready) noexcept {
+    Task t = std::move(this->buf[hd & Mask]);
+    this->head.store(hd + 1, std::memory_order_release);
+    this->notFullGate.fetch_add(1, std::memory_order_release);
+    this->notFullGate.notify_one();
+
+    const bool ok = ready && this->process(t);
+
+    if (!ok) {
+      this->stop();
+    }
+    if constexpr (awaitable_task<Task>) {
+      if (t.completion != nullptr) {
+        t.completion->signal(ok);
+      }
+    }
+  }
+
+  /// The worker loop. start() runs it on a new thread; call it yourself to run it on the current thread.
+  /// Returns after stop(), once the queue is drained.
+  void run() noexcept {
+    this->consumer.claim("muypoco: Chan is single-consumer but a second thread consumed it");
+
+    const bool ready = this->ensureInit();
     std::size_t hd = this->head.load(std::memory_order_relaxed);
 
     for (;;) {
@@ -299,23 +328,27 @@ struct Chan {
         continue;
       }
 
-      Task t = std::move(this->buf[hd & Mask]);
+      this->consume(hd, ready);
       hd += 1;
-      this->head.store(hd, std::memory_order_release);
-      this->notFullGate.fetch_add(1, std::memory_order_release);
-      this->notFullGate.notify_one();
-
-      const bool ok = ready && this->process(t);
-
-      if (!ok) {
-        this->stop();
-      }
-      if constexpr (awaitable_task<Task>) {
-        if (t.completion != nullptr) {
-          t.completion->signal(ok);
-        }
-      }
     }
+  }
+
+  /// Processes the tasks already queued, on the calling thread, and returns how many it processed. Never blocks.
+  /// For programs with their own main loop: call it once per iteration instead of start() or run().
+  /// The first call runs the worker's init().
+  std::size_t drain() noexcept {
+    this->consumer.claim("muypoco: Chan is single-consumer but a second thread consumed it");
+
+    const bool ready = this->ensureInit();
+    const std::size_t tl = this->tail.load(std::memory_order_acquire);
+    std::size_t hd = this->head.load(std::memory_order_relaxed);
+    const std::size_t count = tl - hd;
+
+    while (hd != tl) {
+      this->consume(hd, ready);
+      hd += 1;
+    }
+    return count;
   }
 };
 

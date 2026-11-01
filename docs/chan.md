@@ -47,6 +47,37 @@ store.stop();       // stop accepting; the worker drains the queue and exits
 store.shutdown();   // stop() and join
 ```
 
+## On the main thread
+
+Don't call `start()`. Call `run()` from the thread that should do the work. It runs the worker loop right there and returns after `stop()`, once the queue is drained:
+
+```cpp
+struct OnMain {
+  void process(Tick& tick) noexcept;   // runs on the main thread
+};
+
+muypoco::Chan<OnMain, Tick, 64> mainLoop;
+
+int main() {
+  // timers, other threads: mainLoop.enqueue(...)
+  mainLoop.run();                      // blocks until someone calls mainLoop.stop()
+}
+```
+
+If the main thread already has a loop of its own (epoll, a game loop, a GUI), use `drain()`. It processes what's queued right now, on the calling thread, and returns how many tasks it ran, without blocking:
+
+```cpp
+while (running) {
+  pollSockets();
+  mainLoop.drain();
+  render();
+}
+```
+
+The first `drain()` runs the worker's `init()`. Use one consumer per channel: `start()`, `run()` or `drain()`, from a single thread.
+
+This is how you get events onto the main thread. See [events: threads](events.html#threads) and [examples/main_thread.cpp](https://github.com/vaguue/muypoco/blob/main/examples/main_thread.cpp).
+
 ## Await
 
 Rarely needed. It blocks until the worker has processed the task, and the task must carry a `std::shared_ptr<muypoco::Completion> completion`:
@@ -67,7 +98,8 @@ bool ready = store.awaitInit();                           // false when init() f
 Without `NDEBUG`, `Chan` aborts with a message when:
 
 - a second thread enqueues (single producer);
-- the worker enqueues into or awaits its own channel (it would deadlock once full);
+- a second thread consumes (`start()` plus `drain()`, or `drain()` from two threads);
+- the consumer enqueues into or awaits its own channel (it would deadlock once full);
 - `start()` is called twice.
 
 In release builds these checks compile to nothing.
